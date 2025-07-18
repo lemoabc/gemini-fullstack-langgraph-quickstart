@@ -1,44 +1,144 @@
+# LangGraph 全栈应用生产环境部署配置
+#
+# 这个Docker Compose文件定义了完整的生产环境栈，包括：
+# 1. Redis: 消息队列和缓存服务
+# 2. PostgreSQL: 数据持久化和状态存储  
+# 3. LangGraph API: 主应用服务（包含前端构建）
+#
+# 架构说明：
+# - Redis作为消息代理，支持LangGraph的实时事件流
+# - PostgreSQL存储对话历史、线程状态等持久化数据
+# - 应用服务整合了前后端，通过单一容器提供完整服务
+#
+# 使用方式：
+# 1. 设置环境变量：GEMINI_API_KEY 和 LANGSMITH_API_KEY
+# 2. 运行：docker-compose up
+# 3. 访问：http://localhost:8123/app/
+
+# ========== 数据卷定义 ==========
 volumes:
+  # LangGraph数据持久化卷
+  # 用于存储PostgreSQL数据库文件，确保容器重启后数据不丢失
   langgraph-data:
-    driver: local
+    driver: local  # 使用本地存储驱动
+
+# ========== 服务定义 ==========
 services:
+  # Redis服务：消息队列和缓存
+  # 作用：
+  # 1. 发布-订阅消息代理：支持LangGraph的实时事件流传输
+  # 2. 缓存服务：临时存储会话数据和中间结果
+  # 3. 任务队列：管理后台任务的执行队列
   langgraph-redis:
-    image: docker.io/redis:6
-    container_name: langgraph-redis
+    image: docker.io/redis:6        # 使用Redis 6.x稳定版本
+    container_name: langgraph-redis # 容器名称，便于识别和管理
+    
+    # 健康检查配置：确保Redis服务正常运行
     healthcheck:
-      test: redis-cli ping
-      interval: 5s
-      timeout: 1s
-      retries: 5
+      test: redis-cli ping          # 检查命令：Redis ping操作
+      interval: 5s                  # 检查间隔：每5秒检查一次
+      timeout: 1s                   # 超时时间：1秒无响应视为失败
+      retries: 5                    # 重试次数：连续5次失败才视为不健康
+
+  # PostgreSQL服务：数据持久化
+  # 作用：
+  # 1. 存储对话历史和用户会话
+  # 2. 持久化LangGraph的线程状态
+  # 3. 管理"恰好一次"语义的任务队列状态
+  # 4. 存储长期记忆和用户偏好
   langgraph-postgres:
-    image: docker.io/postgres:16
+    image: docker.io/postgres:16    # 使用PostgreSQL 16最新版本
     container_name: langgraph-postgres
+    
+    # 端口映射：将容器的5432端口映射到主机的5433端口
+    # 避免与主机上可能运行的PostgreSQL实例冲突
     ports:
       - "5433:5432"
+    
+    # 环境变量配置：数据库初始化参数
     environment:
-      POSTGRES_DB: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres         # 默认数据库名
+      POSTGRES_USER: postgres       # 数据库用户名
+      POSTGRES_PASSWORD: postgres   # 数据库密码（生产环境应使用更安全的密码）
+    
+    # 数据卷挂载：持久化数据库文件
     volumes:
       - langgraph-data:/var/lib/postgresql/data
+    
+    # 健康检查配置：确保数据库服务正常运行
     healthcheck:
-      test: pg_isready -U postgres
-      start_period: 10s
-      timeout: 1s
-      retries: 5
-      interval: 5s
+      test: pg_isready -U postgres  # 检查命令：PostgreSQL就绪检查
+      start_period: 10s             # 启动等待期：服务启动后10秒开始检查
+      timeout: 1s                   # 超时时间
+      retries: 5                    # 重试次数
+      interval: 5s                  # 检查间隔
+
+  # LangGraph API服务：主应用服务
+  # 作用：
+  # 1. 运行LangGraph AI代理：执行复杂的研究工作流
+  # 2. 提供REST API：处理前端请求和WebSocket连接
+  # 3. 服务静态文件：提供优化后的前端构建文件
+  # 4. 集成外部服务：连接Gemini API和Google搜索
   langgraph-api:
-    image: gemini-fullstack-langgraph
+    image: gemini-fullstack-langgraph  # 自定义镜像（通过Dockerfile构建）
     container_name: langgraph-api
+    
+    # 端口映射：将容器的8000端口映射到主机的8123端口
     ports:
       - "8123:8000"
+    
+    # 依赖关系：确保支撑服务健康后再启动主服务
     depends_on:
       langgraph-redis:
-        condition: service_healthy
+        condition: service_healthy   # 等待Redis健康检查通过
       langgraph-postgres:
-        condition: service_healthy
+        condition: service_healthy   # 等待PostgreSQL健康检查通过
+    
+    # 环境变量配置：应用运行时参数
     environment:
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
-      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
+      # AI服务配置
+      GEMINI_API_KEY: ${GEMINI_API_KEY}        # Gemini API密钥（必需）
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}  # LangSmith监控密钥（可选）
+      
+      # 数据库连接配置
+      # 使用服务名作为主机名（Docker网络内部解析）
       REDIS_URI: redis://langgraph-redis:6379
       POSTGRES_URI: postgres://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
+
+# ========== 部署说明 ==========
+#
+# 1. 环境要求：
+#    - Docker Engine 20.0+
+#    - Docker Compose 2.0+
+#    - 至少2GB可用内存
+#    - 稳定的网络连接（用于API调用）
+#
+# 2. 必需的环境变量：
+#    - GEMINI_API_KEY: 从Google AI Studio获取
+#    - LANGSMITH_API_KEY: 从LangSmith平台获取（可选）
+#
+# 3. 启动命令：
+#    GEMINI_API_KEY=your_key LANGSMITH_API_KEY=your_key docker-compose up
+#
+# 4. 访问方式：
+#    - 应用界面: http://localhost:8123/app/
+#    - API端点: http://localhost:8123/api/
+#    - 数据库: localhost:5433 (postgres/postgres)
+#
+# 5. 数据持久化：
+#    - PostgreSQL数据存储在langgraph-data卷中
+#    - 容器删除后数据仍然保留
+#    - 备份建议：定期导出PostgreSQL数据
+#
+# 6. 扩展配置：
+#    - 可以通过environment字段添加更多配置
+#    - 支持.env文件自动加载环境变量
+#    - 可以调整资源限制和网络设置
+#
+# 7. 监控和日志：
+#    - 使用docker-compose logs查看服务日志
+#    - 健康检查状态：docker-compose ps
+#    - 服务重启：docker-compose restart <service_name>
+#
+# 这个配置提供了生产就绪的部署方案，
+# 包含了必要的依赖服务和健康检查机制。
